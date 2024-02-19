@@ -5,8 +5,8 @@ import org.example.task1.model.ApplicationStatusResponse;
 import org.example.task1.model.Response;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -16,40 +16,71 @@ public class HandlerImpl implements Handler {
     private static final long TIMEOUT_IN_MILLIS = 15000;
     private static final AtomicInteger FAILED_REQUESTS_NUMBER = new AtomicInteger();
 
-    private final Client client;
+    private static Map<Integer, Function<String, Response>> callByServiceId;
 
-    private final ExecutorCompletionService<Response> executorService
-            = new ExecutorCompletionService<>(Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors()));
+    private final ScheduledExecutorService executorService
+            = Executors.newScheduledThreadPool(Runtime.getRuntime().availableProcessors());
 
     public HandlerImpl(Client client) {
-        this.client = client;
+        callByServiceId = Map.of(
+                1, client::getApplicationStatus1,
+                2, client::getApplicationStatus2
+        );
+
     }
 
     @Override
     public ApplicationStatusResponse performOperation(String id) {
         long startTime = System.currentTimeMillis();
 
-        List<Future<Response>> futureResponses = new ArrayList<>(2);
-
-        futureResponses.add(executorService.submit(() -> getApplicationStatus(() -> client.getApplicationStatus1(id))));
-        futureResponses.add(executorService.submit(() -> getApplicationStatus(() -> client.getApplicationStatus2(id))));
+        Map<Integer, Future<Response>> futureResponseByServiceId = new HashMap<>(2);
+        for (Map.Entry<Integer, Function<String, Response>> e : callByServiceId.entrySet()) {
+            futureResponseByServiceId.put(
+                    e.getKey(),
+                    executorService.submit(() -> getApplicationStatus(id, e.getValue()))
+            );
+        }
 
         while (System.currentTimeMillis() < startTime + TIMEOUT_IN_MILLIS) {
-            for (Future<Response> e : futureResponses) {
-                if (e.isDone()) {
-                    try {
-                        return map(e.get());
-                    } catch (InterruptedException | ExecutionException ex) {
-                        throw new RuntimeException(ex);
-                    }
+            for (Map.Entry<Integer, Future<Response>> e : futureResponseByServiceId.entrySet()) {
+                if (!e.getValue().isDone()) {
+                    continue;
+                }
+
+                Response response = null;
+                try {
+                    response = e.getValue().get();
+                } catch (InterruptedException | ExecutionException ex) {
+                    throw new RuntimeException(ex);
+                }
+
+                if (response instanceof Response.RetryAfter retryAfterResponse) {
+                    executorService.schedule(
+                            () -> callByServiceId.get(e.getKey()),
+                            retryAfterResponse.delay().toMillis(),
+                            TimeUnit.MILLISECONDS
+                    );
+                } else if (response instanceof Response.Success successClientResponse) {
+                    return new ApplicationStatusResponse.Success(
+                            successClientResponse.applicationId(),
+                            successClientResponse.applicationStatus()
+                    );
+                } else if (response instanceof Response.Failure) {
+                    return new ApplicationStatusResponse.Failure(
+                            Duration.ofMillis(System.currentTimeMillis() - startTime),
+                            FAILED_REQUESTS_NUMBER.incrementAndGet()
+                    );
                 }
             }
         }
 
-        return null;
+        return new ApplicationStatusResponse.Failure(
+                Duration.ofMillis(System.currentTimeMillis() - startTime),
+                FAILED_REQUESTS_NUMBER.incrementAndGet()
+        );
     }
 
-    private Response getApplicationStatus(Callable<Response> clientCall) {
+    private Response getApplicationStatus(String id, Function<String, Response> responseFromServiceFunction) {
         Response response = null;
         Duration delay = null;
 
@@ -63,7 +94,7 @@ public class HandlerImpl implements Handler {
             }
 
             try {
-                response = clientCall.call();
+                response = responseFromServiceFunction.apply(id);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -71,23 +102,5 @@ public class HandlerImpl implements Handler {
         }
 
         return response;
-    }
-
-    private static ApplicationStatusResponse map(Response clientResponse) {
-
-        if (clientResponse instanceof Response.Success successClientResponse) {
-            return new ApplicationStatusResponse.Success(
-                    successClientResponse.applicationId(),
-                    successClientResponse.applicationStatus()
-            );
-        } else if (clientResponse instanceof Response.Failure) {
-
-            return new ApplicationStatusResponse.Failure(
-                    null,
-                    FAILED_REQUESTS_NUMBER.incrementAndGet()
-            );
-        }
-
-        throw new IllegalArgumentException();
     }
 }
