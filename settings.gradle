@@ -1,0 +1,4 @@
+rootProject.name = 'tinkoff_exam_java'
+include 'task_2'
+include 'task_1'
+
