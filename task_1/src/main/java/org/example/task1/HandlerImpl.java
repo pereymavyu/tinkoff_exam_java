@@ -37,7 +37,7 @@ public class HandlerImpl implements Handler {
         for (Map.Entry<Integer, Function<String, Response>> e : callByServiceId.entrySet()) {
             futureResponseByServiceId.put(
                     e.getKey(),
-                    executorService.submit(() -> getApplicationStatus(id, e.getValue()))
+                    executorService.submit(() -> e.getValue().apply(id))
             );
         }
 
@@ -56,7 +56,7 @@ public class HandlerImpl implements Handler {
 
                 if (response instanceof Response.RetryAfter retryAfterResponse) {
                     executorService.schedule(
-                            () -> callByServiceId.get(e.getKey()),
+                            () -> callByServiceId.get(e.getKey()).apply(id),
                             retryAfterResponse.delay().toMillis(),
                             TimeUnit.MILLISECONDS
                     );
@@ -78,29 +78,5 @@ public class HandlerImpl implements Handler {
                 Duration.ofMillis(System.currentTimeMillis() - startTime),
                 FAILED_REQUESTS_NUMBER.incrementAndGet()
         );
-    }
-
-    private Response getApplicationStatus(String id, Function<String, Response> responseFromServiceFunction) {
-        Response response = null;
-        Duration delay = null;
-
-        while (response == null || response instanceof Response.RetryAfter) {
-            if (delay != null) {
-                try {
-                    wait(delay.toMillis());
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-
-            try {
-                response = responseFromServiceFunction.apply(id);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-            delay = response instanceof Response.RetryAfter ? ((Response.RetryAfter) response).delay() : null;
-        }
-
-        return response;
     }
 }
